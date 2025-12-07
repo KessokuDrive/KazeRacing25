@@ -1,7 +1,6 @@
 import torch
 import torchvision
 import os
-from livelossplot import PlotLosses
 import numpy as np
 from collections import defaultdict
 
@@ -17,8 +16,6 @@ DATASET_PATH = os.path.join(SCRIPT_DIR, 'datasets', DATASET)
 
 device = torch.device('cuda')
 
-# Initialize livelossplot for real-time plotting
-plotlosses = PlotLosses()
 
 TRANSFORMS = transforms.Compose([
     transforms.ColorJitter(0.2, 0.2, 0.2, 0.2),
@@ -140,7 +137,7 @@ model.fc = torch.nn.Linear(512, 2).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
 
 #Set batch size, larger batch sizes will be train faster and stabilize learning
-batch_size = 32
+batch_size = 128
 #set number of epochs
 num_epochs = 20
 
@@ -174,9 +171,6 @@ for epoch in range(1, num_epochs + 1):
     
     # Validate epoch
     valid_loss, valid_error = train_eval(test_dataloader, model, False, epoch, metrics_history)
-    
-    # Plot metrics after each epoch
-    plot_metrics(metrics_history)
     
     print(f"Convergence: Train Loss={train_loss:.7f}, Valid Loss={valid_loss:.7f}")
 
