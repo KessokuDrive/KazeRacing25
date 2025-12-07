@@ -1,18 +1,22 @@
 import torch
 import torchvision
+from torchvision.models import ResNet18_Weights
 import os
 import numpy as np
 from collections import defaultdict
 
 from torch.utils.data import DataLoader
-from DataLoader import XYDataset
+from DataLoader import HDF5Dataset
 import torchvision.transforms as transforms
 
-# Configuration: Set the dataset parent folder path
-# Users can easily change this to point to any dataset folder (baseline_processed, custom_processed, etc.)
-DATASET = 'baseline_processed'
+# Configuration: Set the dataset name
+# Users can change this to point to any HDF5 dataset folder (baseline_hdf5, custom_hdf5, etc.)
+DATASET = 'baseline_hdf5'
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASET_PATH = os.path.join(SCRIPT_DIR, 'datasets', DATASET)
+HDF5_FILE = os.path.join(DATASET_PATH, 'dataset.h5')
+
+
 
 device = torch.device('cuda')
 
@@ -128,10 +132,11 @@ def plot_metrics(metrics_history):
 
 #Load model and optimizer
 ## ResNet 50
-# model = torchvision.models.wide_resnet50_2(pretrained=True).to(device)
+# from torchvision.models import Wide_ResNet50_2_Weights
+# model = torchvision.models.wide_resnet50_2(weights=Wide_ResNet50_2_Weights.IMAGENET1K_V1).to(device)
 # model.fc = torch.nn.Linear(2048, 2).to(device)
 ## ResNet 18
-model = torchvision.models.resnet18(pretrained=True).to(device)
+model = torchvision.models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).to(device)
 model.fc = torch.nn.Linear(512, 2).to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
@@ -142,12 +147,21 @@ batch_size = 128
 num_epochs = 20
 
 #Load datasets and create dataloaders
-train_txt_path = os.path.join(DATASET_PATH, 'train.txt')
-valid_txt_path = os.path.join(DATASET_PATH, 'valid.txt')
-train_datasets = XYDataset(train_txt_path, TRANSFORMS, random_hflip=True)
-valid_datasets = XYDataset(valid_txt_path, TRANSFORMS, random_hflip=True)
+# Check if HDF5 file exists
+if not os.path.exists(HDF5_FILE):
+    print(f"Error: HDF5 dataset file not found at {HDF5_FILE}")
+    print("Please run labelme2Dataset.py first to convert your dataset to HDF5 format")
+    exit(1)
+
+print(f"Loading HDF5 dataset from: {HDF5_FILE}")
+train_datasets = HDF5Dataset(HDF5_FILE, split='train', transform=TRANSFORMS, random_hflip=True)
+valid_datasets = HDF5Dataset(HDF5_FILE, split='valid', transform=TRANSFORMS, random_hflip=True)
 train_dataloader = DataLoader(train_datasets, batch_size, shuffle=True)
 test_dataloader = DataLoader(valid_datasets, batch_size, shuffle=True)
+
+print(f"Training samples: {len(train_datasets)}")
+print(f"Validation samples: {len(valid_datasets)}")
+
 
 # Initialize metrics history for tracking convergence
 metrics_history = {
