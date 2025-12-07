@@ -1,22 +1,19 @@
 import torch
 import torchvision
-from torchvision.models import ResNet18_Weights
 import os
 import numpy as np
+import time
 from collections import defaultdict
 
 from torch.utils.data import DataLoader
-from DataLoader import HDF5Dataset
+from DataLoader import XYDataset
 import torchvision.transforms as transforms
 
-# Configuration: Set the dataset name
-# Users can change this to point to any HDF5 dataset folder (baseline_hdf5, custom_hdf5, etc.)
-DATASET = 'baseline_hdf5'
+# Configuration: Set the dataset parent folder path
+# Users can easily change this to point to any dataset folder (baseline_processed, custom_processed, etc.)
+DATASET = 'baseline_processed'
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASET_PATH = os.path.join(SCRIPT_DIR, 'datasets', DATASET)
-HDF5_FILE = os.path.join(DATASET_PATH, 'dataset.h5')
-
-
 
 device = torch.device('cuda')
 
@@ -28,13 +25,15 @@ TRANSFORMS = transforms.Compose([
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-def train_eval(dataloader, model, is_training, epoch, metrics_history):
+def train_eval(dataloader, model, optimizer, batch_size, is_training, epoch, metrics_history):
     """
     Train or evaluate the model and track metrics.
     
     Args:
         dataloader: DataLoader for training/validation data
         model: The neural network model
+        optimizer: Optimizer for training
+        batch_size: Batch size for progress display
         is_training: Boolean indicating if in training mode
         epoch: Current epoch number
         metrics_history: Dictionary to store historical metrics
@@ -54,11 +53,16 @@ def train_eval(dataloader, model, is_training, epoch, metrics_history):
         total_error = 0.0
         batch_count = 0
         
+        # Debug: Check dataloader
+        if len(dataloader) == 0:
+            print(f"ERROR: {mode_name} dataloader is empty! Dataset size: {len(dataloader.dataset)}")
+            return 0, 0
+        
         with torch.set_grad_enabled(is_training):
             for batch, (images, xy) in enumerate(dataloader):
-                # send data to device
-                images = images.to(device)
-                xy = xy.to(device)
+                # send data to device (non_blocking=True speeds up transfer when using pin_memory)
+                images = images.to(device, non_blocking=True)
+                xy = xy.to(device, non_blocking=True)
 
                 if is_training:
                     # zero gradients of parameters
@@ -87,28 +91,37 @@ def train_eval(dataloader, model, is_training, epoch, metrics_history):
                     # step optimizer to adjust parameters
                     optimizer.step()
         
-        avg_loss = total_loss / batch_count if batch_count > 0 else 0
-        avg_error = total_error / batch_count if batch_count > 0 else 0
+        # Check if any batches were processed
+        if batch_count == 0:
+            print(f"WARNING: No batches processed during {mode_name}! Check if dataset is empty or dataloader is misconfigured.")
+            print(f"Dataset size: {len(dataloader.dataset)}")
+            return 0, 0
+        
+        avg_loss = total_loss / batch_count
+        avg_error = total_error / batch_count
         
         # Store metrics in history
         if is_training:
             metrics_history['train_loss'].append(avg_loss)
             metrics_history['train_error'].append(avg_error)
-            print(f"Epoch {epoch} - Train Loss: {avg_loss:.7f}, Train Error: {avg_error:.7f}")
+            print(f"Epoch {epoch} - Train Loss: {avg_loss:.7f}, Train Error: {avg_error:.7f} (Processed {batch_count} batches)")
         else:
             metrics_history['valid_loss'].append(avg_loss)
             metrics_history['valid_error'].append(avg_error)
-            print(f"Epoch {epoch} - Valid Loss: {avg_loss:.7f}, Valid Error: {avg_error:.7f}")
+            print(f"Epoch {epoch} - Valid Loss: {avg_loss:.7f}, Valid Error: {avg_error:.7f} (Processed {batch_count} batches)")
             
-            # Save model after validation
-            torch.save(model.state_dict(), f"model_{epoch}.pth")
+            # Save model every 5 epochs (optimization: reduce I/O overhead)
+            if epoch % 5 == 0:
+                torch.save(model.state_dict(), f"model_{epoch}.pth")
         
         return avg_loss, avg_error
         
     except Exception as e:
-        print(f"Error during {mode_name}: {str(e)}")
+        print(f"ERROR during {mode_name}: {str(e)}")
         import traceback
         traceback.print_exc()
+        print(f"Dataset size: {len(dataloader.dataset)}")
+        print(f"Batch size: {batch_size}")
         return 0, 0
 
 
@@ -126,77 +139,161 @@ def plot_metrics(metrics_history):
             'error': metrics_history['train_error'][-1],
             'val_error': metrics_history['valid_error'][-1]
         }
-        plotlosses.update(logs)
-        plotlosses.send()
 
 
-#Load model and optimizer
-## ResNet 50
-# from torchvision.models import Wide_ResNet50_2_Weights
-# model = torchvision.models.wide_resnet50_2(weights=Wide_ResNet50_2_Weights.IMAGENET1K_V1).to(device)
-# model.fc = torch.nn.Linear(2048, 2).to(device)
-## ResNet 18
-model = torchvision.models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).to(device)
-model.fc = torch.nn.Linear(512, 2).to(device)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
-
-#Set batch size, larger batch sizes will be train faster and stabilize learning
-batch_size = 128
-#set number of epochs
-num_epochs = 20
-
-#Load datasets and create dataloaders
-# Check if HDF5 file exists
-if not os.path.exists(HDF5_FILE):
-    print(f"Error: HDF5 dataset file not found at {HDF5_FILE}")
-    print("Please run labelme2Dataset.py first to convert your dataset to HDF5 format")
-    exit(1)
-
-print(f"Loading HDF5 dataset from: {HDF5_FILE}")
-train_datasets = HDF5Dataset(HDF5_FILE, split='train', transform=TRANSFORMS, random_hflip=True)
-valid_datasets = HDF5Dataset(HDF5_FILE, split='valid', transform=TRANSFORMS, random_hflip=True)
-train_dataloader = DataLoader(train_datasets, batch_size, shuffle=True)
-test_dataloader = DataLoader(valid_datasets, batch_size, shuffle=True)
-
-print(f"Training samples: {len(train_datasets)}")
-print(f"Validation samples: {len(valid_datasets)}")
-
-
-# Initialize metrics history for tracking convergence
-metrics_history = {
-    'train_loss': [],
-    'valid_loss': [],
-    'train_error': [],
-    'valid_error': []
-}
-
-print("Starting training with real-time visualization...")
-print(f"Dataset: {DATASET_PATH}")
-print(f"Batch size: {batch_size}")
-print(f"Epochs: {num_epochs}\n")
-
-for epoch in range(1, num_epochs + 1):
-    print(f"\nEpoch {epoch}/{num_epochs}")
-    print("-------------------------------")
+def main():
+    """Main training function - required for Windows multiprocessing."""
     
-    # Train epoch
-    train_loss, train_error = train_eval(train_dataloader, model, True, epoch, metrics_history)
-    
-    # Validate epoch
-    valid_loss, valid_error = train_eval(test_dataloader, model, False, epoch, metrics_history)
-    
-    print(f"Convergence: Train Loss={train_loss:.7f}, Valid Loss={valid_loss:.7f}")
+    #Load model and optimizer
+    from torchvision.models import ResNet18_Weights
+    ## ResNet 50
+    # from torchvision.models import ResNet50_Weights
+    # model = torchvision.models.wide_resnet50_2(weights=Wide_ResNet50_2_Weights.IMAGENET1K_V1).to(device)
+    # model.fc = torch.nn.Linear(2048, 2).to(device)
+    ## ResNet 18
+    model = torchvision.models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).to(device)
+    model.fc = torch.nn.Linear(512, 2).to(device)
 
-# Save final metrics to file
-print("\nTraining completed!")
-print("Saving final metrics...")
-metrics_file = os.path.join(SCRIPT_DIR, 'training_metrics.txt')
-with open(metrics_file, 'w') as f:
-    f.write("Epoch\tTrain_Loss\tValid_Loss\tTrain_Error\tValid_Error\n")
-    for i in range(len(metrics_history['train_loss'])):
-        f.write(f"{i+1}\t{metrics_history['train_loss'][i]:.7f}\t{metrics_history['valid_loss'][i]:.7f}\t")
-        f.write(f"{metrics_history['train_error'][i]:.7f}\t{metrics_history['valid_error'][i]:.7f}\n")
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
 
-print(f"Metrics saved to: {metrics_file}")
-print("Plot window will remain open. Close it to exit.")
+    #Set batch size, larger batch sizes will be train faster and stabilize learning
+    batch_size = 128
+    #set number of epochs
+    num_epochs = 20
+
+    # Speed optimization: Number of parallel workers for data loading
+    # Set to number of CPU cores (typically 4-8). 0 = single-threaded (slow)
+    # On Windows, num_workers > 0 requires code to be in if __name__ == '__main__'
+    num_workers = 4  # Parallel data loading significantly speeds up training
+
+    #Load datasets and create dataloaders
+    train_txt_path = os.path.join(DATASET_PATH, 'train.txt')
+    valid_txt_path = os.path.join(DATASET_PATH, 'valid.txt')
+
+    # Check if dataset files exist
+    if not os.path.exists(train_txt_path):
+        print(f"ERROR: Training dataset file not found: {train_txt_path}")
+        print("Please ensure the dataset has been prepared correctly.")
+        return
+
+    if not os.path.exists(valid_txt_path):
+        print(f"ERROR: Validation dataset file not found: {valid_txt_path}")
+        print("Please ensure the dataset has been prepared correctly.")
+        return
+
+    train_datasets = XYDataset(train_txt_path, TRANSFORMS, random_hflip=True)
+    valid_datasets = XYDataset(valid_txt_path, TRANSFORMS, random_hflip=True)
+
+    # Check if datasets are empty
+    if len(train_datasets) == 0:
+        print(f"ERROR: Training dataset is empty! Found 0 samples in {train_txt_path}")
+        return
+
+    if len(valid_datasets) == 0:
+        print(f"ERROR: Validation dataset is empty! Found 0 samples in {valid_txt_path}")
+        return
+
+    print(f"Dataset loaded: {len(train_datasets)} training samples, {len(valid_datasets)} validation samples")
+
+    # Optimized DataLoader with parallel loading and pinned memory
+    # pin_memory=True: Faster GPU transfer (2-3x speedup for data loading)
+    # num_workers: Parallel data loading on CPU
+    train_dataloader = DataLoader(train_datasets, batch_size, shuffle=True, 
+                                  num_workers=num_workers, pin_memory=True)
+    test_dataloader = DataLoader(valid_datasets, batch_size, shuffle=True, 
+                                num_workers=num_workers, pin_memory=True)
+
+    # Initialize metrics history for tracking convergence
+    metrics_history = {
+        'train_loss': [],
+        'valid_loss': [],
+        'train_error': [],
+        'valid_error': [],
+        'epoch_time': []  # Time in seconds for each epoch
+    }
+
+    print("Starting training with real-time visualization...")
+    print(f"Dataset: {DATASET_PATH}")
+    print(f"Batch size: {batch_size}")
+    print(f"Num workers: {num_workers} (parallel data loading)")
+    print(f"Pin memory: True (faster GPU transfer)")
+    print(f"Epochs: {num_epochs}\n")
+
+    for epoch in range(1, num_epochs + 1):
+        print(f"\nEpoch {epoch}/{num_epochs}")
+        print("-------------------------------")
+        
+        # Start timing the epoch
+        epoch_start_time = time.time()
+        
+        # Train epoch
+        train_loss, train_error = train_eval(train_dataloader, model, optimizer, batch_size, True, epoch, metrics_history)
+        
+        # Validate epoch
+        valid_loss, valid_error = train_eval(test_dataloader, model, optimizer, batch_size, False, epoch, metrics_history)
+        
+        # Calculate epoch time
+        epoch_time = time.time() - epoch_start_time
+        metrics_history['epoch_time'].append(epoch_time)
+        
+        # Format time for display (handle sub-second times properly)
+        if epoch_time < 1.0:
+            time_str = f"{epoch_time:.2f}s"
+        elif epoch_time < 60.0:
+            time_str = f"{epoch_time:.2f}s"
+        else:
+            minutes = int(epoch_time // 60)
+            seconds = int(epoch_time % 60)
+            time_str = f"{minutes}m {seconds}s"
+        
+        print(f"Convergence: Train Loss={train_loss:.7f}, Valid Loss={valid_loss:.7f}")
+        print(f"Epoch Time: {time_str}")
+
+    # Save final metrics to file
+    print("\nTraining completed!")
+    print("Saving final metrics...")
+    metrics_file = os.path.join(SCRIPT_DIR, 'training_metrics.txt')
+
+    # Calculate total training time
+    if metrics_history['epoch_time']:
+        total_time = sum(metrics_history['epoch_time'])
+        avg_epoch_time = np.mean(metrics_history['epoch_time'])
+        min_epoch_time = min(metrics_history['epoch_time'])
+        max_epoch_time = max(metrics_history['epoch_time'])
+        
+        # Format total time
+        if total_time < 60.0:
+            total_time_str = f"{total_time:.2f} seconds"
+        else:
+            total_minutes = int(total_time // 60)
+            total_seconds = int(total_time % 60)
+            total_time_str = f"{total_minutes}m {total_seconds}s ({total_time:.2f} seconds)"
+    else:
+        total_time = 0.0
+        avg_epoch_time = 0.0
+        min_epoch_time = 0.0
+        max_epoch_time = 0.0
+        total_time_str = "0.00 seconds"
+
+    with open(metrics_file, 'w') as f:
+        f.write("Epoch\tTrain_Loss\tValid_Loss\tTrain_Error\tValid_Error\tEpoch_Time_Seconds\n")
+        for i in range(len(metrics_history['train_loss'])):
+            epoch_time_val = metrics_history['epoch_time'][i] if i < len(metrics_history['epoch_time']) else 0.0
+            f.write(f"{i+1}\t{metrics_history['train_loss'][i]:.7f}\t{metrics_history['valid_loss'][i]:.7f}\t")
+            f.write(f"{metrics_history['train_error'][i]:.7f}\t{metrics_history['valid_error'][i]:.7f}\t")
+            f.write(f"{epoch_time_val:.2f}\n")
+
+    print(f"Metrics saved to: {metrics_file}")
+    print(f"\nTraining Statistics:")
+    print(f"  Total Training Time: {total_time_str}")
+    print(f"  Average Epoch Time: {avg_epoch_time:.2f} seconds")
+    print(f"  Fastest Epoch: {min_epoch_time:.2f} seconds")
+    print(f"  Slowest Epoch: {max_epoch_time:.2f} seconds")
+    print("Plot window will remain open. Close it to exit.")
+
+
+if __name__ == '__main__':
+    # Required for multiprocessing to work safely on Windows
+    # This prevents the RuntimeError when using num_workers > 0
+    main()
