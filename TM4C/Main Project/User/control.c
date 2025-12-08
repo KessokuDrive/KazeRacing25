@@ -4,99 +4,71 @@
 //  - AUTO   : Vision/data control via auto.c
 //
 // Rules:
-//   1) At power-up, start in MANUAL mode (RC control).
-//   2) Periodically sample RC pulses:
-//        * If we see ANY non-neutral command -> stay in/enter MANUAL.
-//        * If we are in MANUAL and BOTH channels stay neutral
-//          for >= 3 seconds -> go back to AUTO.
+//   1) At power-up, start in MANUAL mode (RC control) - fail-safe default.
+//   2) Mode is controlled by RC mode switch on PB2:
+//        * High 2ms (or no signal) -> MANUAL mode (fail-safe)
+//        * High 0.9ms -> AUTO mode
 //   3) STOP mode is not used; AUTO should output neutral when it has no data.
+//   4) Onboard RGB LED indicates mode:
+//        * RED (PF1) -> MANUAL mode
+//        * BLUE (PF2) -> AUTO mode
 
 #include "control.h"
 #include "manual.h"
 #include "auto.h"
 #include "pwm_output.h"
 #include "rc_input.h"
+#include "tm4c123gh6pm.h"
 
-#define NEUTRAL_US    1500U
-#define NEUTRAL_TOL   40U        // tolerance around neutral to treat as "neutral"
-
-// One control frame ~20 ms.
-// We sample RC every N frames: N * 20 ms = RC sample interval.
-#define RC_CHECK_INTERVAL_FRAMES        5U    // 5 * 20ms ˜ 100 ms
-
-// If both channels are neutral for this many RC samples in MANUAL,
-// we treat it as "user stopped using RC" and go back to AUTO.
-// 30 samples * 100 ms ˜ 3 seconds.
-#define MANUAL_NEUTRAL_SAMPLES_THRESHOLD 30U
+// LED pins on TM4C123GH6PM LaunchPad (Port F)
+#define LED_RED    (1U << 1)   // PF1
+#define LED_BLUE   (1U << 2)   // PF2
+#define LED_GREEN  (1U << 3)   // PF3
 
 static control_mode_t g_curr_mode = CONTROL_MODE_MANUAL;
 
-// 0: use AUTO (RC not active)
-// 1: use MANUAL (RC active)
-static uint8_t  g_manual_enabled        = 1U;  // start in MANUAL
-static uint32_t g_rc_check_counter      = 0U;
-static uint32_t g_manual_neutral_samples = 0U;
-
 // -----------------------------------------------------------
-// Helper: absolute difference of two unsigned values
+// Helper: Update LED to indicate current driving mode
+//   RED (PF1)  -> MANUAL mode
+//   BLUE (PF2) -> AUTO mode
 // -----------------------------------------------------------
-static uint16_t abs_diff_u16(uint16_t a, uint16_t b)
+static void Control_UpdateLED(void)
 {
-    return (a > b) ? (a - b) : (b - a);
+    // Turn off all LEDs first, then turn on the appropriate one
+    GPIO_PORTF_DATA_R &= ~(LED_RED | LED_BLUE | LED_GREEN);
+    
+    if (g_curr_mode == CONTROL_MODE_MANUAL) {
+        // MANUAL mode: RED LED on
+        GPIO_PORTF_DATA_R |= LED_RED;
+    } else {
+        // AUTO mode: BLUE LED on
+        GPIO_PORTF_DATA_R |= LED_BLUE;
+    }
 }
 
 // -----------------------------------------------------------
-// Helper: sample RC pulses and update g_manual_enabled.
-//
-//  - When MANUAL is OFF (g_manual_enabled == 0):
-//        If any channel is non-neutral -> enter MANUAL.
-//  - When MANUAL is ON (g_manual_enabled == 1):
-//        If both channels stay neutral for >= 3 s -> back to AUTO.
+// Helper: Update mode based on RC mode switch (PB2)
+//   Returns 1 if mode changed, 0 otherwise
 // -----------------------------------------------------------
-static void Control_UpdateModeByRcActivity(void)
+static uint8_t Control_UpdateMode(void)
 {
-    // Count control frames and only sample RC every RC_CHECK_INTERVAL_FRAMES
-    g_rc_check_counter++;
-    if (g_rc_check_counter < RC_CHECK_INTERVAL_FRAMES) {
-        return;
-    }
-    g_rc_check_counter = 0U;
-
-    // Sample RC pulses once (blocking, but only every ~100 ms)
-    uint16_t thr = RC_GetThrottlePulseUs();
-    uint16_t str = RC_GetSteerPulseUs();
-
-    uint16_t diff_thr = abs_diff_u16(thr, NEUTRAL_US);
-    uint16_t diff_str = abs_diff_u16(str, NEUTRAL_US);
-
-    uint8_t is_thr_neutral = (diff_thr <= NEUTRAL_TOL);
-    uint8_t is_str_neutral = (diff_str <= NEUTRAL_TOL);
-
-    if (!g_manual_enabled) {
-        // Currently in AUTO mode.
-        // If any channel is non-neutral -> enable MANUAL.
-        if (!is_thr_neutral || !is_str_neutral) {
-            g_manual_enabled = 1U;
-            g_manual_neutral_samples = 0U;  // reset counter when entering MANUAL
-        }
+    control_mode_t new_mode;
+    
+    // Check mode switch: 1 = MANUAL, 0 = AUTO
+    if (RC_IsManualMode()) {
+        new_mode = CONTROL_MODE_MANUAL;
     } else {
-        // Currently in MANUAL mode.
-        // If both channels are neutral -> count neutral samples.
-        if (is_thr_neutral && is_str_neutral) {
-            if (g_manual_neutral_samples < 100000U) {
-                g_manual_neutral_samples++;
-            }
-        } else {
-            // Any non-neutral command resets the neutral counter.
-            g_manual_neutral_samples = 0U;
-        }
-
-        // If we stayed neutral for >= threshold -> go back to AUTO.
-        if (g_manual_neutral_samples >= MANUAL_NEUTRAL_SAMPLES_THRESHOLD) {
-            g_manual_enabled = 0U;          // back to AUTO
-            g_manual_neutral_samples = 0U;  // reset counter
-        }
+        new_mode = CONTROL_MODE_AUTO;
     }
+    
+    // Update mode if changed
+    if (new_mode != g_curr_mode) {
+        g_curr_mode = new_mode;
+        Control_UpdateLED();  // Update LED when mode changes
+        return 1U;
+    }
+    
+    return 0U;
 }
 
 // -----------------------------------------------------------
@@ -105,10 +77,40 @@ static void Control_UpdateModeByRcActivity(void)
 
 void Control_Init(void)
 {
-    g_curr_mode               = CONTROL_MODE_MANUAL;
-    g_manual_enabled          = 1U;    // start in MANUAL mode
-    g_rc_check_counter        = 0U;
-    g_manual_neutral_samples  = 0U;
+    volatile uint32_t delay;
+    
+    // Initialize mode to MANUAL (fail-safe default)
+    g_curr_mode = CONTROL_MODE_MANUAL;
+    
+    // Initialize GPIO Port F for LED control
+    SYSCTL_RCGCGPIO_R |= (1U << 5);   // Enable Port F clock (bit 5)
+    
+    // Wait for Port F to be ready (small delay for clock stabilization)
+    delay = SYSCTL_RCGCGPIO_R;
+    delay = SYSCTL_RCGCGPIO_R;
+    delay = SYSCTL_RCGCGPIO_R;
+    (void)delay;
+    
+    // Disable analog mode first
+    GPIO_PORTF_AMSEL_R &= ~(LED_RED | LED_BLUE | LED_GREEN);
+    
+    // Disable alternate functions
+    GPIO_PORTF_AFSEL_R &= ~(LED_RED | LED_BLUE | LED_GREEN);
+    
+    // Clear PCTL for these pins (GPIO mode)
+    GPIO_PORTF_PCTL_R &= ~(0x0000FFF0U);  // Clear PCTL for PF1, PF2, PF3
+    
+    // Configure PF1 (RED), PF2 (BLUE), PF3 (GREEN) as outputs
+    GPIO_PORTF_DIR_R |= (LED_RED | LED_BLUE | LED_GREEN);
+    
+    // Enable digital function
+    GPIO_PORTF_DEN_R |= (LED_RED | LED_BLUE | LED_GREEN);
+    
+    // Turn off all LEDs first
+    GPIO_PORTF_DATA_R &= ~(LED_RED | LED_BLUE | LED_GREEN);
+    
+    // Set initial LED state (RED for MANUAL mode)
+    Control_UpdateLED();
 }
 
 control_mode_t Control_GetMode(void)
@@ -118,24 +120,25 @@ control_mode_t Control_GetMode(void)
 
 void Control_RunFrame(void)
 {
-    // 1) Update MANUAL/AUTO selection based on RC activity.
-    Control_UpdateModeByRcActivity();
+    // 1) Update MANUAL/AUTO selection based on RC mode switch (PB2)
+    Control_UpdateMode();
 
-    // 2) Decide mode and run one frame.
+    // 2) Run control frame based on current mode
     switch (g_curr_mode)
-	{
-	case CONTROL_MODE_MANUAL:
-		Manual_RunFrame();
-		break;
+    {
+    case CONTROL_MODE_MANUAL:
+        Manual_RunFrame();
+        break;
 
-	case CONTROL_MODE_AUTO:
-		Auto_RunFrame();
-		break;
-	
-	default:
-		Manual_RunFrame();
-		break;
-	}
+    case CONTROL_MODE_AUTO:
+        Auto_RunFrame();
+        break;
+    
+    default:
+        // Fail-safe: default to MANUAL
+        Manual_RunFrame();
+        break;
+    }
     // NOTE:
     //  - STOP mode is not used here. If AUTO has no valid data,
     //    Auto_RunFrame() should output neutral (safe stop) itself.
