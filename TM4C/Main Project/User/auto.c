@@ -9,8 +9,8 @@
 #include "pwm_output.h"
 
 #define NEUTRAL_US     1500U
-#define ESC_MIN_US     1000U
-#define ESC_MAX_US     2000U
+#define ESC_MIN_US     500U
+#define ESC_MAX_US     1000U
 #define SERVO_MIN_US   1100U   // smaller range for servo
 #define SERVO_MAX_US   1900U
 

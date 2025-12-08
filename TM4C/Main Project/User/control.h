@@ -1,5 +1,6 @@
 // control.h
 // Mode manager: select MANUAL / AUTO / STOP.
+// Currently starts in MANUAL.
 
 #ifndef CONTROL_H_
 #define CONTROL_H_

@@ -4,9 +4,9 @@
 //  - AUTO   : Vision/data control via auto.c
 //
 // Rules:
-//   1) At power-up, start in AUTO mode (ignore RC).
+//   1) At power-up, start in MANUAL mode (RC control).
 //   2) Periodically sample RC pulses:
-//        * If we see ANY non-neutral command -> enter MANUAL.
+//        * If we see ANY non-neutral command -> stay in/enter MANUAL.
 //        * If we are in MANUAL and BOTH channels stay neutral
 //          for >= 3 seconds -> go back to AUTO.
 //   3) STOP mode is not used; AUTO should output neutral when it has no data.
@@ -29,11 +29,11 @@
 // 30 samples * 100 ms ˜ 3 seconds.
 #define MANUAL_NEUTRAL_SAMPLES_THRESHOLD 30U
 
-static control_mode_t g_curr_mode = CONTROL_MODE_STOP;
+static control_mode_t g_curr_mode = CONTROL_MODE_MANUAL;
 
 // 0: use AUTO (RC not active)
 // 1: use MANUAL (RC active)
-static uint8_t  g_manual_enabled        = 0U;
+static uint8_t  g_manual_enabled        = 1U;  // start in MANUAL
 static uint32_t g_rc_check_counter      = 0U;
 static uint32_t g_manual_neutral_samples = 0U;
 
@@ -105,8 +105,8 @@ static void Control_UpdateModeByRcActivity(void)
 
 void Control_Init(void)
 {
-    g_curr_mode               = CONTROL_MODE_STOP;
-    g_manual_enabled          = 0U;    // start in AUTO mode
+    g_curr_mode               = CONTROL_MODE_MANUAL;
+    g_manual_enabled          = 1U;    // start in MANUAL mode
     g_rc_check_counter        = 0U;
     g_manual_neutral_samples  = 0U;
 }
@@ -122,16 +122,20 @@ void Control_RunFrame(void)
     Control_UpdateModeByRcActivity();
 
     // 2) Decide mode and run one frame.
-    if (g_manual_enabled) {
-        // MANUAL mode: RC control
-        g_curr_mode = CONTROL_MODE_MANUAL;
-        Manual_RunFrame();
-    } else {
-        // AUTO mode: vision/data control
-        g_curr_mode = CONTROL_MODE_AUTO;
-        Auto_RunFrame();
-    }
+    switch (g_curr_mode)
+	{
+	case CONTROL_MODE_MANUAL:
+		Manual_RunFrame();
+		break;
 
+	case CONTROL_MODE_AUTO:
+		Auto_RunFrame();
+		break;
+	
+	default:
+		Manual_RunFrame();
+		break;
+	}
     // NOTE:
     //  - STOP mode is not used here. If AUTO has no valid data,
     //    Auto_RunFrame() should output neutral (safe stop) itself.
