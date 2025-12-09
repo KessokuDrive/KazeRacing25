@@ -1,273 +1,242 @@
 // jetson_control.c
-// UART1 communication with Jetson Nano for autonomous driving commands.
-// Protocol: 6-byte packet [0xAA][speed_low][speed_high][steer_low][steer_high][checksum]
-// Baud rate: 115200, 8N1
+// UART0 communication with Jetson Nano
+// Protocol: "T:####,S:####\n" (throttle and steer values)
 
-#include "jetson_control.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+#include "tm4c123gh6pm.h"
+#include "jetson_control.h"
+#include "data.h"
 
-// TivaWare includes
-#include "inc/hw_memmap.h"
-#include "inc/hw_types.h"
-#include "inc/hw_ints.h"
-#include "driverlib/sysctl.h"
-#include "driverlib/gpio.h"
-#include "driverlib/uart.h"
-#include "driverlib/pin_map.h"
-#include "driverlib/interrupt.h"
+// UART0 uses PA0 (RX) and PA1 (TX)
+#define UART0_BAUDRATE  115200
+#define SYS_CLOCK_HZ    50000000UL
 
-// Protocol definitions
-#define PACKET_HEADER     0xAA
-#define PACKET_SIZE       6
-#define ACK_HEADER        0x55
-#define ACK_SIZE          6
+// Command timeout: if no valid command received in this many ms, invalidate
+#define CMD_TIMEOUT_MS  500
 
-// Status codes for acknowledgment
-#define STATUS_OK         0x00
-#define STATUS_BAD_CSUM   0x01
-#define STATUS_TIMEOUT    0x02
+// Receive buffer for incoming UART data
+#define RX_BUFFER_SIZE  64
+static char rx_buffer[RX_BUFFER_SIZE];
+static volatile uint8_t rx_index = 0;
 
-// Packet state machine
-typedef enum {
-    STATE_WAIT_HEADER = 0,
-    STATE_SPEED_LOW,
-    STATE_SPEED_HIGH,
-    STATE_STEER_LOW,
-    STATE_STEER_HIGH,
-    STATE_CHECKSUM
-} rx_state_t;
+// Latest parsed command
+static data_cmd_t latest_cmd = {0, 0, 0};  // speed=0, steer=0, valid=0
+static volatile uint32_t last_cmd_time = 0;  // simple tick counter
 
-// Receive buffer and state
-static volatile rx_state_t g_rx_state = STATE_WAIT_HEADER;
-static volatile uint8_t g_rx_buffer[PACKET_SIZE];
-static volatile uint8_t g_rx_index = 0;
+// Simple millisecond counter (incremented externally if needed, or use SysTick)
+static volatile uint32_t system_tick_ms = 0;
 
-// Latest valid command
-static volatile data_cmd_t g_jetson_cmd;
-static volatile uint8_t g_cmd_updated = 0;
-static volatile uint32_t g_last_rx_time = 0;
+// Forward declarations
+static void UART0_SendChar(char c);
+static void UART0_SendString(const char *str);
+static bool UART0_DataAvailable(void);
+static char UART0_ReadChar(void);
+static void ParseCommand(const char *buffer);
 
-// Timeout tracking (in ms, approximate)
-#define CMD_TIMEOUT_MS    500U
-static volatile uint32_t g_tick_count = 0;
-
-// Statistics
-static volatile uint32_t g_packets_received = 0;
-static volatile uint32_t g_packets_bad_checksum = 0;
-
-//-----------------------------------------------------------------------------
-// Send acknowledgment packet to Jetson
-//-----------------------------------------------------------------------------
-static void send_ack(int16_t speed, int16_t steer, uint8_t status)
-{
-    uint8_t ack_packet[ACK_SIZE];
-    
-    // Build acknowledgment packet
-    ack_packet[0] = ACK_HEADER;
-    ack_packet[1] = (uint8_t)(speed & 0xFF);        // Speed low byte
-    ack_packet[2] = (uint8_t)((speed >> 8) & 0xFF); // Speed high byte
-    ack_packet[3] = (uint8_t)(steer & 0xFF);        // Steer low byte
-    ack_packet[4] = (uint8_t)((steer >> 8) & 0xFF); // Steer high byte
-    ack_packet[5] = status;                          // Status byte
-    
-    // Send each byte
-    for(uint8_t i = 0; i < ACK_SIZE; i++) {
-        UARTCharPut(UART1_BASE, ack_packet[i]);
-    }
-}
-
-//-----------------------------------------------------------------------------
-// UART1 Interrupt Handler
-//-----------------------------------------------------------------------------
-void UART1IntHandler(void)
-{
-    uint32_t ui32Status;
-    int32_t rx_char;
-    
-    // Get and clear the interrupt status
-    ui32Status = UARTIntStatus(UART1_BASE, true);
-    UARTIntClear(UART1_BASE, ui32Status);
-    
-    // Process all available characters
-    while(UARTCharsAvail(UART1_BASE))
-    {
-        rx_char = UARTCharGetNonBlocking(UART1_BASE);
-        
-        if(rx_char == -1) {
-            break;  // No more characters
-        }
-        
-        uint8_t byte = (uint8_t)rx_char;
-        
-        switch(g_rx_state)
-        {
-            case STATE_WAIT_HEADER:
-                if(byte == PACKET_HEADER) {
-                    g_rx_buffer[0] = byte;
-                    g_rx_index = 1;
-                    g_rx_state = STATE_SPEED_LOW;
-                }
-                break;
-                
-            case STATE_SPEED_LOW:
-                g_rx_buffer[1] = byte;
-                g_rx_index = 2;
-                g_rx_state = STATE_SPEED_HIGH;
-                break;
-                
-            case STATE_SPEED_HIGH:
-                g_rx_buffer[2] = byte;
-                g_rx_index = 3;
-                g_rx_state = STATE_STEER_LOW;
-                break;
-                
-            case STATE_STEER_LOW:
-                g_rx_buffer[3] = byte;
-                g_rx_index = 4;
-                g_rx_state = STATE_STEER_HIGH;
-                break;
-                
-            case STATE_STEER_HIGH:
-                g_rx_buffer[4] = byte;
-                g_rx_index = 5;
-                g_rx_state = STATE_CHECKSUM;
-                break;
-                
-            case STATE_CHECKSUM:
-            {
-                // Add braces to create proper scope for local variables
-                g_rx_buffer[5] = byte;
-                
-                // Validate checksum (XOR of bytes 1-4)
-                uint8_t calc_checksum = g_rx_buffer[1] ^ g_rx_buffer[2] ^ 
-                                       g_rx_buffer[3] ^ g_rx_buffer[4];
-                
-                // Decode speed and steer
-                int16_t speed = (int16_t)((g_rx_buffer[2] << 8) | g_rx_buffer[1]);
-                int16_t steer = (int16_t)((g_rx_buffer[4] << 8) | g_rx_buffer[3]);
-                
-                if(calc_checksum == byte) {
-                    // Valid packet
-                    g_packets_received++;
-                    
-                    // Clamp values to valid range
-                    if(speed > 1000) speed = 1000;
-                    if(speed < -1000) speed = -1000;
-                    if(steer > 1000) steer = 1000;
-                    if(steer < -1000) steer = -1000;
-                    
-                    // Update command
-                    g_jetson_cmd.speed = speed;
-                    g_jetson_cmd.steer = steer;
-                    g_jetson_cmd.valid = 1;
-                    g_cmd_updated = 1;
-                    g_last_rx_time = g_tick_count;
-                    
-                    // Send acknowledgment
-                    send_ack(speed, steer, STATUS_OK);
-                } else {
-                    // Bad checksum
-                    g_packets_bad_checksum++;
-                    send_ack(speed, steer, STATUS_BAD_CSUM);
-                }
-                
-                // Reset state machine
-                g_rx_state = STATE_WAIT_HEADER;
-                g_rx_index = 0;
-                break;
-            }
-                
-            default:
-                // Invalid state - reset
-                g_rx_state = STATE_WAIT_HEADER;
-                g_rx_index = 0;
-                break;
-        }
-    }
-}
-
-//-----------------------------------------------------------------------------
-// Initialize UART1 for Jetson communication
-//-----------------------------------------------------------------------------
+//*****************************************************************************
+// Initialize UART0 for communication with Jetson Nano
+// UART0: PA0=RX, PA1=TX, 115200 baud, 8N1
+//*****************************************************************************
 void UART_Vision_Init(void)
 {
-    // Enable peripherals
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_UART1);
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
+    uint32_t brd_int, brd_frac;
     
-    // Wait for peripherals to be ready
-    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_UART1)) {}
-    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOB)) {}
+    // 1. Enable clock to UART0 and GPIO Port A
+    SYSCTL_RCGCUART_R |= 0x01;      // UART0
+    SYSCTL_RCGCGPIO_R |= 0x01;      // Port A
     
-    // Configure GPIO pins for UART1
-    // PB0 = U1RX, PB1 = U1TX
-    GPIOPinConfigure(GPIO_PB0_U1RX);
-    GPIOPinConfigure(GPIO_PB1_U1TX);
-    GPIOPinTypeUART(GPIO_PORTB_BASE, GPIO_PIN_0 | GPIO_PIN_1);
+    // Small delay for peripheral to be ready
+    __asm("NOP"); __asm("NOP"); __asm("NOP");
     
-    // Configure UART: 115200 baud, 8-N-1
-    UARTConfigSetExpClk(UART1_BASE, SysCtlClockGet(), 115200,
-                        (UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE |
-                         UART_CONFIG_PAR_NONE));
+    // 2. Disable UART0 while configuring
+    UART0_CTL_R &= ~0x01;           // Clear UARTEN bit
     
-    // Enable UART1 RX interrupt
-    IntEnable(INT_UART1);
-	UARTEnable(UART1_BASE);
-    UARTIntEnable(UART1_BASE, UART_INT_RX | UART_INT_RT);
+    // Enable UART0 receive interrupt
+    UART0_IM_R |= 0x10;             // Enable RX interrupt
+    NVIC_EN0_R |= 0x20;             // Enable UART0 interrupt in NVIC
+    NVIC_PRI1_R = (NVIC_PRI1_R & 0xFFFF00FF) | 0x00004000; // Priority 2
     
-    // Initialize command structure
-    g_jetson_cmd.speed = 0;
-    g_jetson_cmd.steer = 0;
-    g_jetson_cmd.valid = 0;
-    g_cmd_updated = 0;
-    g_last_rx_time = 0;
-    g_tick_count = 0;
+    // 3. Calculate baud rate divisor
+    // BRD = BRDI + BRDF = UARTSysClk / (16 * Baud Rate)
+    // For 50 MHz clock, 115200 baud:
+    // BRD = 50000000 / (16 * 115200) = 27.1267
+    // BRDI = 27, BRDF = int(0.1267 * 64 + 0.5) = 8
+    brd_int = SYS_CLOCK_HZ / (16 * UART0_BAUDRATE);
+    brd_frac = (uint32_t)(((float)(SYS_CLOCK_HZ % (16 * UART0_BAUDRATE)) / 
+                          (16.0f * UART0_BAUDRATE)) * 64.0f + 0.5f);
     
-    // Reset state machine
-    g_rx_state = STATE_WAIT_HEADER;
-    g_rx_index = 0;
+    UART0_IBRD_R = brd_int;
+    UART0_FBRD_R = brd_frac;
     
-    // Enable UART
-    UARTEnable(UART1_BASE);
+    // 4. Configure Line Control: 8 bits, no parity, 1 stop bit, FIFOs enabled
+    UART0_LCRH_R = 0x60;            // 8-bit (WLEN=0x3), FIFO enable (FEN=1)
+    
+    // 5. Use system clock
+    UART0_CC_R = 0x0;               // Use system clock
+    
+    // 6. Enable UART0 (TX, RX, and UART)
+    UART0_CTL_R = 0x301;            // UARTEN=1, TXE=1, RXE=1
+    
+    // Enable interrupts globally
+    __enable_irq();
+    
+    // 7. Configure GPIO PA0, PA1 for UART
+    GPIO_PORTA_AFSEL_R |= 0x03;     // Enable alt function on PA0, PA1
+    GPIO_PORTA_PCTL_R = (GPIO_PORTA_PCTL_R & 0xFFFFFF00) | 0x00000011; // UART
+    GPIO_PORTA_DEN_R |= 0x03;       // Digital enable PA0, PA1
+    GPIO_PORTA_AMSEL_R &= ~0x03;    // Disable analog on PA0, PA1
+    
+    // Initialize state
+    rx_index = 0;
+    latest_cmd.speed = 0;
+    latest_cmd.steer = 0;
+    latest_cmd.valid = 0;
+    last_cmd_time = 0;
+    system_tick_ms = 0;
+    
+    // Add a small delay to ensure UART is fully ready
+    for (volatile uint32_t i = 0; i < 10000; i++);
+    
+    // Send init complete message
+    UART0_SendString("TM4C UART0 INIT COMPLETE\r\n");
 }
 
-//-----------------------------------------------------------------------------
-// Process receive timeout and update command validity
-//-----------------------------------------------------------------------------
-void Jetson_ProcessRx(void)
+//*****************************************************************************
+// Send a single character via UART0
+//*****************************************************************************
+static void UART0_SendChar(char c)
 {
-    // Increment tick counter (called every ~20ms, so 1 tick ~ 20ms)
-    g_tick_count++;
-    
-    // Check for timeout (no data received for CMD_TIMEOUT_MS)
-    uint32_t elapsed = (g_tick_count - g_last_rx_time) * 20;  // Convert to ms
-    
-    if(elapsed > CMD_TIMEOUT_MS && g_jetson_cmd.valid) {
-        // Timeout - invalidate command for safety
-        g_jetson_cmd.valid = 0;
-        g_jetson_cmd.speed = 0;
-        g_jetson_cmd.steer = 0;
+    // Wait until TX FIFO is not full
+    while (UART0_FR_R & 0x20);      // Wait while TXFF=1
+    UART0_DR_R = c;
+}
+
+//*****************************************************************************
+// Send a string via UART0
+//*****************************************************************************
+static void UART0_SendString(const char *str)
+{
+    while (*str) {
+        UART0_SendChar(*str++);
     }
 }
 
-//-----------------------------------------------------------------------------
-// Get latest command from Jetson
-//-----------------------------------------------------------------------------
+//*****************************************************************************
+// Check if data is available in UART0 RX FIFO
+//*****************************************************************************
+static bool UART0_DataAvailable(void)
+{
+    return !(UART0_FR_R & 0x10);    // Return true if RXFE=0 (not empty)
+}
+
+//*****************************************************************************
+// Read a character from UART0 (non-blocking, assumes data is available)
+//*****************************************************************************
+static char UART0_ReadChar(void)
+{
+    // Read directly from data register (caller should check availability first)
+    return (char)(UART0_DR_R & 0xFF);
+}
+
+//*****************************************************************************
+// Parse command string in format "T:####,S:####\n"
+// Example: "T:500,S:-200\n"
+//*****************************************************************************
+static void ParseCommand(const char *buffer)
+{
+    int16_t throttle = 0;
+    int16_t steer = 0;
+    
+    // Try to parse the command using sscanf
+    if (sscanf(buffer, "T:%hd,S:%hd", &throttle, &steer) == 2) {
+        // Valid parse - clamp values to expected range
+        if (throttle > 1000) throttle = 1000;
+        if (throttle < -1000) throttle = -1000;
+        if (steer > 1000) steer = 1000;
+        if (steer < -1000) steer = -1000;
+        
+        // Update latest command
+        latest_cmd.speed = throttle;
+        latest_cmd.steer = steer;
+        latest_cmd.valid = 1;
+        last_cmd_time = system_tick_ms;
+        
+        // Echo the received command back to Jetson with newline
+        UART0_SendString("ACK:");
+        UART0_SendString(buffer);
+        UART0_SendString("\r\n");
+    }
+}
+
+//*****************************************************************************
+// UART0 interrupt handler
+//*****************************************************************************
+void UART0_Handler(void)
+{
+    // Clear interrupt
+    UART0_ICR_R = 0x10;
+    
+    // Process received character
+    char c = UART0_ReadChar();
+    
+    // Check for line ending (newline indicates complete command)
+    if (c == '\n' || c == '\r') {
+        if (rx_index > 0) {
+            // Null-terminate and mark for parsing
+            rx_buffer[rx_index] = '\0';
+            rx_index = 0;  // Reset for next command
+        }
+    }
+    // Check for buffer overflow
+    else if (rx_index >= RX_BUFFER_SIZE - 1) {
+        // Buffer full - discard and reset
+        rx_index = 0;
+    }
+    // Normal character - add to buffer
+    else {
+        rx_buffer[rx_index++] = c;
+    }
+}
+
+// Process received commands (call this periodically, e.g., every 20ms)
+//*****************************************************************************
+void Jetson_ProcessRx(void)
+{
+    // Increment tick counter (simple approach - 20ms per call)
+    system_tick_ms += 20;
+    
+    // Check for command timeout
+    if (latest_cmd.valid && 
+        (system_tick_ms - last_cmd_time) > CMD_TIMEOUT_MS) {
+        // Timeout - invalidate command for safety
+        latest_cmd.valid = 0;
+        latest_cmd.speed = 0;
+        latest_cmd.steer = 0;
+    }
+    
+    // Parse any complete commands in the buffer
+    if (rx_index == 0 && rx_buffer[0] != '\0') {
+        ParseCommand(rx_buffer);
+    }
+}
+
+//*****************************************************************************
+// Get the latest valid command from Jetson
+// Returns 1 if valid command available, 0 otherwise
+//*****************************************************************************
 uint8_t Jetson_GetCmd(data_cmd_t *cmd)
 {
-    if(!cmd) {
+    if (cmd == 0) {
         return 0;
     }
     
-    // Disable interrupts briefly to read atomic data
-    IntMasterDisable();
+    // Copy latest command to caller's structure
+    cmd->speed = latest_cmd.speed;
+    cmd->steer = latest_cmd.steer;
+    cmd->valid = latest_cmd.valid;
     
-    cmd->speed = g_jetson_cmd.speed;
-    cmd->steer = g_jetson_cmd.steer;
-    cmd->valid = g_jetson_cmd.valid;
-    
-    IntMasterEnable();
-    
-    return cmd->valid;
+    return latest_cmd.valid;
 }

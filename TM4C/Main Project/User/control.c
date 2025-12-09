@@ -118,8 +118,12 @@ control_mode_t Control_GetMode(void)
     return g_curr_mode;
 }
 
+#define UART_DEBUG
 void Control_RunFrame(void)
 {
+#	ifdef UART_DEBUG
+	Auto_RunFrame();
+#	else
     // 1) Update MANUAL/AUTO selection based on RC mode switch (PB2)
     Control_UpdateMode();
 
@@ -142,4 +146,5 @@ void Control_RunFrame(void)
     // NOTE:
     //  - STOP mode is not used here. If AUTO has no valid data,
     //    Auto_RunFrame() should output neutral (safe stop) itself.
+#	endif
 }
