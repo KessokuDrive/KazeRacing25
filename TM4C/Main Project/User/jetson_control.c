@@ -31,7 +31,7 @@ static volatile uint32_t system_tick_ms = 0;
 
 // Forward declarations
 static void UART0_SendChar(char c);
-static void UART0_SendString(const char *str);
+void UART0_SendString(const char *str);
 static bool UART0_DataAvailable(void);
 static char UART0_ReadChar(void);
 static void ParseCommand(const char *buffer);
@@ -117,7 +117,7 @@ static void UART0_SendChar(char c)
 //*****************************************************************************
 // Send a string via UART0
 //*****************************************************************************
-static void UART0_SendString(const char *str)
+void UART0_SendString(const char *str)
 {
     while (*str) {
         UART0_SendChar(*str++);

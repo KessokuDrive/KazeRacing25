@@ -14,6 +14,11 @@
 // UART0: RX=PA0, TX=PA1, 115200 baud, 8N1
 void UART_Vision_Init(void);
 
+/**
+send string to UART0
+*/
+void UART0_SendString(const char *str);
+
 // Process received UART data (call periodically in control loop)
 // Reads incoming bytes and parses commands
 void Jetson_ProcessRx(void);
