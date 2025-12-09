@@ -218,8 +218,10 @@ void Jetson_ProcessRx(void)
     }
     
     // Parse any complete commands in the buffer
-    if (rx_index == 0 && rx_buffer[0] != '\0') {
+    if (rx_buffer[0] != '\0') {
         ParseCommand(rx_buffer);
+        // Clear buffer after parsing
+        rx_buffer[0] = '\0';
     }
 }
 

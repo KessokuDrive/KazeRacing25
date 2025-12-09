@@ -118,7 +118,7 @@ control_mode_t Control_GetMode(void)
     return g_curr_mode;
 }
 
-#define UART_DEBUG
+//#define UART_DEBUG
 void Control_RunFrame(void)
 {
 #	ifdef UART_DEBUG
