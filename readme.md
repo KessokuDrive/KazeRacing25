@@ -3,7 +3,12 @@ In order to compile the TM4C project properly, please do copy the lib folder und
 During coding, one should seprate their code in a three layer style.
 
 ## JetsonNano development guide
-fan control
+### Steering and Throttle
+Currently,
++ Throttle 
+	MAX: 800(Left) MIN-450(Right)
+	CENTER: Tobe Define
+### fan control
 ```bash
 sudo sh -c 'echo 255 > /sys/devices/pwm-fan/target_pwm' #Maximun Speed
 ```
@@ -13,7 +18,7 @@ sudo sh -c 'echo 255 > /sys/devices/pwm-fan/target_pwm' #Maximun Speed
     >  For Mobile use
 
     ```bash
-    sudo nmcli device wifi connect MaoLove password 39393939
+    sudo nmcli device wifi connect Ohio password 1145141919810
     ```
 
 	> For Dorm Wifi

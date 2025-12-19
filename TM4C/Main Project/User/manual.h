@@ -15,4 +15,10 @@ void Manual_Init(void);
 //  - Output one PWM frame on PE4/PE5
 void Manual_RunFrame(void);
 
+// Configure global RC adjustments:
+//  scale_pct: percentage applied to diff from neutral (100 = no change)
+//  bias_us  : microsecond offset added after scaling
+void Manual_SetRcAdjust(int16_t thr_scale_pct, int16_t str_scale_pct,
+                        int16_t thr_bias_us,   int16_t str_bias_us);
+
 #endif // MANUAL_H_

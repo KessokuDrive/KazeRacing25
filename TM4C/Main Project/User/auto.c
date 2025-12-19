@@ -7,6 +7,8 @@
 #include "auto.h"
 #include "data.h"
 #include "pwm_output.h"
+#include "jetson_control.h"
+#include <stdio.h>
 
 #define NEUTRAL_US     1500U
 #define ESC_MIN_US     1000U
@@ -16,6 +18,10 @@
 
 // speed, steer range from upper board: -1000..+1000
 #define CMD_RANGE      1000
+
+//Value of Motor and Servo in -1000+1000 scale
+int16_t motor_val = 0;
+int16_t steer_val = 0;
 
 static uint16_t map_speed_to_pwm(int16_t speed)
 {
@@ -57,8 +63,9 @@ static uint16_t map_steer_to_pwm(int16_t steer)
 
 void Auto_Init(void)
 {
-    // Init data simulator or real upper-board interface.
-    Data_Init();
+    motor_val = 0;
+    steer_val = 0;
+    UART_Vision_Init();
 }
 
 void Auto_RunFrame(void)
@@ -66,19 +73,20 @@ void Auto_RunFrame(void)
     data_cmd_t cmd;
     uint8_t has_cmd;
 
-    // Update internal command pattern (or receive new packet).
-    Data_RunFrame();
+    // Process UART reception and check for timeout
+    Jetson_ProcessRx();
 
-    // Read latest high-level command.
-    has_cmd = Data_GetCmd(&cmd);
-
+    // Read latest high-level command from Jetson
+    has_cmd = Jetson_GetCmd(&cmd);
     if (has_cmd && cmd.valid) {
-        uint16_t motor_us = map_speed_to_pwm(cmd.speed);
-        uint16_t steer_us = map_steer_to_pwm(cmd.steer);
-
-        PWM_Output_WriteFrame(motor_us, steer_us);
+        motor_val = cmd.speed;
+        steer_val = cmd.steer;
     } else {
-        // No valid command -> neutral safe output.
-        PWM_Output_WriteFrame(NEUTRAL_US, NEUTRAL_US);
+        // No valid command -> Keep privious
     }
+		// Write the speed into pwm
+		uint16_t motor_us = map_speed_to_pwm(motor_val);
+		uint16_t steer_us = map_steer_to_pwm(steer_val);
+		PWM_Output_WriteFrame(motor_us, steer_us);
+		
 }

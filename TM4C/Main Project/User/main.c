@@ -26,7 +26,7 @@ int main(void)
     RC_Input_Init();       // Configure PB6 / PB7 capture for RC
     PWM_Output_Init();     // Configure PE4 / PE5 PWM output (50 Hz)
     Manual_Init();         // Manual (RC) mode state
-    Auto_Init();           // Auto (vision) mode state + data simulator
+    Auto_Init();           // now uses real UART vision data
     Control_Init();        // Mode manager (start in STOP)
 
     // Enable global interrupts (used by rc_input if using timer capture)
@@ -34,7 +34,7 @@ int main(void)
 
     // ---- Neutral pulses to arm ESC / servo (~2 s) ----
     // Many ESCs need some neutral pulses after power-on.
-    for (i = 0; i < 100U; i++) {       // 100 * 20 ms ˜ 2 s
+    for (i = 0; i < 100U; i++) {       // 100 * 20 ms  2 s
         PWM_Output_WriteFrame(1500U, 1500U);   // ESC neutral, servo center
     }
 
