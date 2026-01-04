@@ -341,7 +341,7 @@
               <MiscControls></MiscControls>
               <Define>rvmdk,PART_TM4C123GH6PM</Define>
               <Undefine></Undefine>
-              <IncludePath>.\user;..\lib;..\lib\driverlib;..\lib\inc;..\lib\utils</IncludePath>
+              <IncludePath>.\user;..\lib;..\lib\driverlib;..\lib\inc;..\lib\utils;.\user</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>

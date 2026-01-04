@@ -17,7 +17,7 @@ class XYDataset(torch.utils.data.Dataset):
     
     def __getitem__(self, idx):
         image_path = self.image_path[idx]
-        annotation_path =  os.path.join(os.path.dirname(image_path),os.path.basename(image_path).replace(".png",'.json'))
+        annotation_path =  os.path.join(os.path.dirname(image_path),os.path.basename(image_path).replace(".jpg",'.json'))
         ann = json.load(open(annotation_path, 'r'))
         image = cv2.imread(image_path, cv2.IMREAD_COLOR)
         image = PIL.Image.fromarray(image)
