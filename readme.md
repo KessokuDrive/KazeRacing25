@@ -47,12 +47,11 @@ Make sure Conda (Anaconda or Miniconda) is installed on your system.
 
 ### Step 2: Create the Conda Environment
 
-Clone the repository and create the environment using the provided `environment.yml` file:
+Clone the repository:
 
 ```bash
 git clone https://github.com/KessokuDrive/KazeRacing25.git
 cd KazeRacing25
-conda env create -f environment.yml
 ```
 
 ### Step 3: Activate the Environment
