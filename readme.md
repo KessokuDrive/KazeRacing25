@@ -1,7 +1,11 @@
 # Kaze Racing
 
 ## About Project
-This project aims to design and implement an on-track autonomous driving car using the visual solution.
+This project aims to design and implement an on-track autonomous driving car using the visual solution.\
+
+We used **ResNet18** as base model, and trained an end-to-end mapping from camera captured image to steering and throttling signal.
+
+Our project consist of the following three part.
 
 - **Desktop Training**  
   Used for model training and validation. Training is performed on a desktop environment with GPU acceleration to efficiently optimize the neural network.
@@ -12,35 +16,18 @@ This project aims to design and implement an on-track autonomous driving car usi
 - **TM4C Microcontroller (Vehicle Firmware)**  
   Responsible for low-level vehicle control. The TM4C microcontroller runs the firmware that handles motor control, steering, and real-time communication with the Jetson Nano.
 
-### 
-
-## Requirements: software
+# Install
+## Traning(Desktop)
+### Requirements
 - Operating System: Windows 10/ Windows 11 / Linux
 - Python 3.10
 - CUDA
 - PyTorch
 - OpenCV
 - Conda
-- Jetpack 4.6.1
 
-## Environment Setup
-```yaml
-name: kzr
-channels:
-  - conda-forge
-dependencies:
-  - python=3.10
-  - pip
-  - pip:
-      - torch==2.8.0+cu128
-      - torchvision==0.23.0+cu128
-      - cupy-cuda13x==13.6.0
-```
-
-### Step 1: Install Conda
+### Step 1: Install Required Software
 Make sure Conda (Anaconda or Miniconda) is installed on your system.
-
-- Anaconda: https://www.anaconda.com/products/distribution  
 - Miniconda (recommended): https://docs.conda.io/en/latest/miniconda.html
 
 ---
@@ -48,24 +35,31 @@ Make sure Conda (Anaconda or Miniconda) is installed on your system.
 ### Step 2: Create the Conda Environment
 
 Clone the repository:
-
 ```bash
 git clone https://github.com/KessokuDrive/KazeRacing25.git
 cd KazeRacing25
 ```
-
-### Step 3: Activate the Environment
-
+Create and the enviroment
 ```bash
+conda env create -f desktop_requirement.yml
 conda activate kzr
 ```
 
-## Pretrained Models
-**ResNet-18**
+### Installation complete
+Now, you may want to run the code for traning at `/DesktopTraning/train.py` or benchmark at `DesktopTraning/benchmark/benchmark.py`
 
-## Preparation for Testing
+## Inference (Jetson Nano)
+### Install Jetpack
+Find the mirror and guid at Nvidia:
++ Jetpack 4.6.1: https://developer.nvidia.com/embedded/jetpack-sdk-461
 
+### Ready to Rock!
+to start, type run this at jetson
+```bash
+sudo /usr/bin/python3 /home/jetson/jetracer/roadfollowing.py
+```
 
+# Note for devs
 ## TM4C Development Guide
 In order to compile the TM4C project properly, please do copy the lib folder under the TM4C folder.
 During coding, one should seprate their code in a three layer style.
