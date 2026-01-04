@@ -15,7 +15,35 @@ DATASET = 'baseline_processed'
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASET_PATH = os.path.join(SCRIPT_DIR, 'datasets', DATASET)
 
-device = torch.device('cuda')
+# Device detection: Supports both NVIDIA CUDA and AMD ROCm
+def get_device():
+    """
+    Detect and return the appropriate device (CUDA, ROCm, or CPU).
+    Supports both NVIDIA GPUs (CUDA) and AMD GPUs (ROCm).
+    
+    Returns:
+        torch.device: The device to use for computation
+    """
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        # Check if it's ROCm (AMD) or CUDA (NVIDIA)
+        if hasattr(torch.version, 'hip') and torch.version.hip is not None:
+            # ROCm (AMD GPU)
+            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "Unknown"
+            print(f"Detected AMD GPU (ROCm): {gpu_name}")
+            print(f"ROCm version: {torch.version.hip}")
+        else:
+            # CUDA (NVIDIA GPU)
+            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "Unknown"
+            print(f"Detected NVIDIA GPU (CUDA): {gpu_name}")
+            print(f"CUDA version: {torch.version.cuda}")
+        print(f"Using device: {device} (GPU {torch.cuda.current_device()})")
+        return device
+    else:
+        print("No GPU detected, using CPU")
+        return torch.device('cpu')
+
+device = get_device()
 
 
 TRANSFORMS = transforms.Compose([
@@ -60,9 +88,23 @@ def train_eval(dataloader, model, optimizer, batch_size, is_training, epoch, met
         
         with torch.set_grad_enabled(is_training):
             for batch, (images, xy) in enumerate(dataloader):
-                # send data to device (non_blocking=True speeds up transfer when using pin_memory)
-                images = images.to(device, non_blocking=True)
-                xy = xy.to(device, non_blocking=True)
+                # send data to device
+                # Note: non_blocking may not work well with ROCm, so we check device type
+                if device.type == 'cuda':
+                    # Check if it's ROCm (non_blocking can cause issues on some ROCm versions)
+                    is_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
+                    if is_rocm:
+                        # ROCm: use blocking transfer for better compatibility
+                        images = images.to(device)
+                        xy = xy.to(device)
+                    else:
+                        # CUDA: use non_blocking for better performance
+                        images = images.to(device, non_blocking=True)
+                        xy = xy.to(device, non_blocking=True)
+                else:
+                    # CPU: no non_blocking option
+                    images = images.to(device)
+                    xy = xy.to(device)
 
                 if is_training:
                     # zero gradients of parameters
@@ -198,11 +240,18 @@ def main():
 
     # Optimized DataLoader with parallel loading and pinned memory
     # pin_memory=True: Faster GPU transfer (2-3x speedup for data loading)
+    # Note: pin_memory works with both CUDA and ROCm
     # num_workers: Parallel data loading on CPU
+    is_rocm = device.type == 'cuda' and hasattr(torch.version, 'hip') and torch.version.hip is not None
+    use_pin_memory = device.type == 'cuda'  # Works for both CUDA and ROCm
+    
     train_dataloader = DataLoader(train_datasets, batch_size, shuffle=True, 
-                                  num_workers=num_workers, pin_memory=True)
+                                  num_workers=num_workers, pin_memory=use_pin_memory)
     test_dataloader = DataLoader(valid_datasets, batch_size, shuffle=True, 
-                                num_workers=num_workers, pin_memory=True)
+                                num_workers=num_workers, pin_memory=use_pin_memory)
+    
+    if is_rocm:
+        print("ROCm detected: Using optimized settings for AMD GPU")
 
     # Initialize metrics history for tracking convergence
     metrics_history = {
@@ -217,7 +266,13 @@ def main():
     print(f"Dataset: {DATASET_PATH}")
     print(f"Batch size: {batch_size}")
     print(f"Num workers: {num_workers} (parallel data loading)")
-    print(f"Pin memory: True (faster GPU transfer)")
+    print(f"Pin memory: {use_pin_memory} (faster GPU transfer)")
+    print(f"Device: {device}")
+    if device.type == 'cuda':
+        if is_rocm:
+            print(f"ROCm version: {torch.version.hip}")
+        else:
+            print(f"CUDA version: {torch.version.cuda}")
     print(f"Epochs: {num_epochs}\n")
 
     for epoch in range(1, num_epochs + 1):

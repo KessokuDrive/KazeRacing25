@@ -39,8 +39,8 @@ import random
 from pathlib import Path
 
 # Configuration
-FILE_EXT = '.png'
-DATASET = 'baseline'
+FILE_EXT = '.jpg'
+DATASET = 'dataset0254_augmented'
 
 # Use the directory where this script is located as the base
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
